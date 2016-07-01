@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	seccomp "github.com/opencontainers/ocitools/contrib/oci-seccomp-gen"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/syndtr/gocapability/capability"
 	"github.com/urfave/cli"
@@ -53,11 +54,14 @@ var generateFlags = []cli.Flag{
 	cli.StringSliceFlag{Name: "gidmappings", Usage: "add GIDMappings e.g HostID:ContainerID:Size"},
 	cli.StringSliceFlag{Name: "sysctl", Usage: "add sysctl settings e.g net.ipv4.forward=1"},
 	cli.StringFlag{Name: "apparmor", Usage: "specifies the the apparmor profile for the container"},
+	cli.BoolFlag{Name: "seccomp-only", Usage: "specifies to export just a seccomp configuration file"},
 	cli.StringFlag{Name: "seccomp-default", Usage: "specifies the the defaultaction of Seccomp syscall restrictions"},
-	cli.StringSliceFlag{Name: "seccomp-arch", Usage: "specifies Additional architectures permitted to be used for system calls"},
-	cli.StringSliceFlag{Name: "seccomp-syscalls", Usage: "specifies Additional architectures permitted to be used for system calls, e.g Name:Action:Arg1_index/Arg1_value/Arg1_valuetwo/Arg1_op, Arg2_index/Arg2_value/Arg2_valuetwo/Arg2_op "},
-	cli.StringSliceFlag{Name: "seccomp-allow", Usage: "specifies syscalls to be added to allowed"},
-	cli.StringSliceFlag{Name: "seccomp-errno", Usage: "specifies syscalls to be added to list that returns an error"},
+	cli.StringFlag{Name: "seccomp-arch", Usage: "specifies Additional architectures permitted to be used for system calls"},
+	cli.StringFlag{Name: "seccomp-allow", Usage: "specifies syscalls to be added to allowed"},
+	cli.StringFlag{Name: "seccomp-trap", Usage: "specifies syscalls to be added to list that returns an error"},
+	cli.StringFlag{Name: "seccomp-errno", Usage: "specifies syscalls to be added to list that returns an error"},
+	cli.StringFlag{Name: "seccomp-trace", Usage: "specifies syscalls to be added to list that returns an error"},
+	cli.StringFlag{Name: "seccomp-kill", Usage: "specifies syscalls to be added to list that returns an error"},
 	cli.StringFlag{Name: "template", Usage: "base template to use for creating the configuration"},
 	cli.StringSliceFlag{Name: "label", Usage: "add annotations to the configuration e.g. key=value"},
 }
@@ -106,11 +110,25 @@ var generateCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		if err := ioutil.WriteFile(cName, data, 0666); err != nil {
-			return err
+		if !onlyExportFlagSpecified(context) {
+			if err := ioutil.WriteFile(cName, data, 0666); err != nil {
+				return err
+			}
 		}
 		return nil
 	},
+}
+
+func onlyExportFlagSpecified(context *cli.Context) bool {
+	onlyExportFlags := []bool{
+		context.Bool("seccomp-only"),
+	}
+	for _, flag := range onlyExportFlags {
+		if flag {
+			return true
+		}
+	}
+	return false
 }
 
 func loadTemplate(path string) (spec *rspec.Spec, err error) {
@@ -232,215 +250,72 @@ func modify(spec *rspec.Spec, context *cli.Context) error {
 	return nil
 }
 
-func addSeccompDefault(spec *rspec.Spec, sdefault string, secc *rspec.Seccomp) error {
-	switch sdefault {
-	case "":
-	case "SCMP_ACT_KILL":
-	case "SCMP_ACT_TRAP":
-	case "SCMP_ACT_ERRNO":
-	case "SCMP_ACT_TRACE":
-	case "SCMP_ACT_ALLOW":
-	default:
-		return fmt.Errorf("seccomp-default must be empty or one of " +
-			"SCMP_ACT_KILL|SCMP_ACT_TRAP|SCMP_ACT_ERRNO|SCMP_ACT_TRACE|" +
-			"SCMP_ACT_ALLOW")
-	}
-	secc.DefaultAction = rspec.Action(sdefault)
-	return nil
-}
-
-func addSeccompArch(spec *rspec.Spec, sArch []string, secc *rspec.Seccomp) error {
-	for _, archs := range sArch {
-		switch archs {
-		case "":
-		case "SCMP_ARCH_X86":
-		case "SCMP_ARCH_X86_64":
-		case "SCMP_ARCH_X32":
-		case "SCMP_ARCH_ARM":
-		case "SCMP_ARCH_AARCH64":
-		case "SCMP_ARCH_MIPS":
-		case "SCMP_ARCH_MIPS64":
-		case "SCMP_ARCH_MIPS64N32":
-		case "SCMP_ARCH_MIPSEL":
-		case "SCMP_ARCH_MIPSEL64":
-		case "SCMP_ARCH_MIPSEL64N32":
-		default:
-			return fmt.Errorf("seccomp-arch must be empty or one of " +
-				"SCMP_ARCH_X86|SCMP_ARCH_X86_64|SCMP_ARCH_X32|SCMP_ARCH_ARM|" +
-				"SCMP_ARCH_AARCH64SCMP_ARCH_MIPS|SCMP_ARCH_MIPS64|" +
-				"SCMP_ARCH_MIPS64N32|SCMP_ARCH_MIPSEL|SCMP_ARCH_MIPSEL64|" +
-				"SCMP_ARCH_MIPSEL64N32")
-		}
-		secc.Architectures = append(secc.Architectures, rspec.Arch(archs))
-	}
-
-	return nil
-}
-
-func addSeccompSyscall(spec *rspec.Spec, sSyscall []string, secc *rspec.Seccomp) error {
-	for _, syscalls := range sSyscall {
-		syscall := strings.Split(syscalls, ":")
-		if len(syscall) == 3 {
-			name := syscall[0]
-			switch syscall[1] {
-			case "":
-			case "SCMP_ACT_KILL":
-			case "SCMP_ACT_TRAP":
-			case "SCMP_ACT_ERRNO":
-			case "SCMP_ACT_TRACE":
-			case "SCMP_ACT_ALLOW":
-			default:
-				return fmt.Errorf("seccomp-syscall action must be empty or " +
-					"one of SCMP_ACT_KILL|SCMP_ACT_TRAP|SCMP_ACT_ERRNO|" +
-					"SCMP_ACT_TRACE|SCMP_ACT_ALLOW")
-			}
-			action := rspec.Action(syscall[1])
-
-			var Args []rspec.Arg
-			if strings.EqualFold(syscall[2], "") {
-				Args = nil
-			} else {
-
-				argsslice := strings.Split(syscall[2], ",")
-				for _, argsstru := range argsslice {
-					args := strings.Split(argsstru, "/")
-					if len(args) == 4 {
-						index, err := strconv.Atoi(args[0])
-						value, err := strconv.Atoi(args[1])
-						value2, err := strconv.Atoi(args[2])
-						if err != nil {
-							return err
-						}
-						switch args[3] {
-						case "":
-						case "SCMP_CMP_NE":
-						case "SCMP_CMP_LT":
-						case "SCMP_CMP_LE":
-						case "SCMP_CMP_EQ":
-						case "SCMP_CMP_GE":
-						case "SCMP_CMP_GT":
-						case "SCMP_CMP_MASKED_EQ":
-						default:
-							return fmt.Errorf("seccomp-syscall args must be " +
-								"empty or one of SCMP_CMP_NE|SCMP_CMP_LT|" +
-								"SCMP_CMP_LE|SCMP_CMP_EQ|SCMP_CMP_GE|" +
-								"SCMP_CMP_GT|SCMP_CMP_MASKED_EQ")
-						}
-						op := rspec.Operator(args[3])
-						Arg := rspec.Arg{
-							Index:    uint(index),
-							Value:    uint64(value),
-							ValueTwo: uint64(value2),
-							Op:       op,
-						}
-						Args = append(Args, Arg)
-					} else {
-						return fmt.Errorf("seccomp-sysctl args error: %s", argsstru)
-					}
-				}
-			}
-
-			syscallstruct := rspec.Syscall{
-				Name:   name,
-				Action: action,
-				Args:   Args,
-			}
-			secc.Syscalls = append(secc.Syscalls, syscallstruct)
-		} else {
-			return fmt.Errorf("seccomp sysctl must consist of 3 parameters")
-		}
-	}
-
-	return nil
-}
-
 func addSeccomp(spec *rspec.Spec, context *cli.Context) error {
 	var secc rspec.Seccomp
-	sd := context.String("seccomp-default")
-	sa := context.StringSlice("seccomp-arch")
-	ss := context.StringSlice("seccomp-syscalls")
 
-	if sd == "" && len(sa) == 0 && len(ss) == 0 {
-		return nil
-	}
+	seccompDefault := context.String("seccomp-default")
+	seccompArch := context.String("seccomp-arch")
+	seccompKill := context.String("seccomp-kill")
+	seccompTrace := context.String("seccomp-trace")
+	seccompErrno := context.String("seccomp-errno")
+	seccompTrap := context.String("seccomp-trap")
+	seccompAllow := context.String("seccomp-allow")
 
 	// Set the DefaultAction of seccomp
-	err := addSeccompDefault(spec, sd, &secc)
+	if seccompDefault == "" {
+		seccompDefault = "allow"
+	}
+	err := seccomp.ParseDefaultAction(seccompDefault, &secc)
 	if err != nil {
 		return err
 	}
 
 	// Add the additional architectures permitted to be used for system calls
-	err = addSeccompArch(spec, sa, &secc)
+	if seccompArch == "" {
+		seccompArch = "amd64,x86,x32"
+	}
+	err = seccomp.ParseArchitectureFlag(seccompArch, &secc)
 	if err != nil {
 		return err
 	}
 
-	// Set syscall restrict in Seccomp
-	// The format of input syscall string is Name:Action:Args[1],Args[2],...,Args[n]
-	// The format of Args string is Index/Value/ValueTwo/Operator,and is parsed by function parseArgs()
-	err = addSeccompSyscall(spec, ss, &secc)
+	err = seccomp.ParseSyscallFlag("kill", seccompKill, &secc)
 	if err != nil {
 		return err
 	}
 
-	for _, a := range context.StringSlice("seccomp-allow") {
-		sysCall := rspec.Syscall{
-			Name:   a,
-			Action: "SCMP_ACT_ALLOW",
-		}
-		secc.Syscalls = append(secc.Syscalls, sysCall)
+	err = seccomp.ParseSyscallFlag("trace", seccompTrace, &secc)
+	if err != nil {
+		return err
 	}
 
-	for _, a := range context.StringSlice("seccomp-errno") {
-		sysCall := rspec.Syscall{
-			Name:   a,
-			Action: "SCMP_ACT_ERRNO",
+	err = seccomp.ParseSyscallFlag("errno", seccompErrno, &secc)
+	if err != nil {
+		return err
+	}
+
+	err = seccomp.ParseSyscallFlag("trap", seccompTrap, &secc)
+	if err != nil {
+		return err
+	}
+
+	err = seccomp.ParseSyscallFlag("allow", seccompAllow, &secc)
+	if err != nil {
+		return err
+	}
+	if context.Bool("seccomp-only") {
+		data, err := json.MarshalIndent(&secc, "", "\t")
+		if err != nil {
+			return err
 		}
-		secc.Syscalls = append(secc.Syscalls, sysCall)
+		if err := ioutil.WriteFile("config.seccomp", data, 0666); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	spec.Linux.Seccomp = &secc
 	return nil
-}
-
-func parseArgs(args2parse string) ([]*rspec.Arg, error) {
-	var Args []*rspec.Arg
-	argstrslice := strings.Split(args2parse, ",")
-	for _, argstr := range argstrslice {
-		args := strings.Split(argstr, "/")
-		if len(args) == 4 {
-			index, err := strconv.Atoi(args[0])
-			value, err := strconv.Atoi(args[1])
-			value2, err := strconv.Atoi(args[2])
-			if err != nil {
-				return nil, err
-			}
-			switch args[3] {
-			case "":
-			case "SCMP_CMP_NE":
-			case "SCMP_CMP_LT":
-			case "SCMP_CMP_LE":
-			case "SCMP_CMP_EQ":
-			case "SCMP_CMP_GE":
-			case "SCMP_CMP_GT":
-			case "SCMP_CMP_MASKED_EQ":
-			default:
-				return nil, fmt.Errorf("seccomp-sysctl args must be empty or one of SCMP_CMP_NE|SCMP_CMP_LT|SCMP_CMP_LE|SCMP_CMP_EQ|SCMP_CMP_GE|SCMP_CMP_GT|SCMP_CMP_MASKED_EQ")
-			}
-			op := rspec.Operator(args[3])
-			Arg := rspec.Arg{
-				Index:    uint(index),
-				Value:    uint64(value),
-				ValueTwo: uint64(value2),
-				Op:       op,
-			}
-			Args = append(Args, &Arg)
-		} else {
-			return nil, fmt.Errorf("seccomp-sysctl args error: %s", argstr)
-		}
-	}
-	return Args, nil
 }
 
 func addIDMappings(spec *rspec.Spec, context *cli.Context) error {
@@ -673,8 +548,6 @@ func mapStrToNamespace(ns string, path string) rspec.Namespace {
 		return rspec.Namespace{Type: rspec.UTSNamespace, Path: path}
 	case "user":
 		return rspec.Namespace{Type: rspec.UserNamespace, Path: path}
-	case "cgroup":
-		return rspec.Namespace{Type: rspec.CgroupNamespace, Path: path}
 	default:
 		logrus.Fatalf("Should not reach here!")
 	}
@@ -687,7 +560,7 @@ func setupNamespaces(spec *rspec.Spec, context *cli.Context) {
 		needsNewUser = true
 	}
 
-	namespaces := []string{"network", "pid", "mount", "ipc", "uts", "user", "cgroup"}
+	namespaces := []string{"network", "pid", "mount", "ipc", "uts", "user"}
 	for _, nsName := range namespaces {
 		if !context.IsSet(nsName) && !(needsNewUser && nsName == "user") {
 			continue
