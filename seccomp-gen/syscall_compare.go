@@ -1,4 +1,4 @@
-package ociseccompgen
+package seccompgen
 
 import (
 	"fmt"

@@ -1,4 +1,4 @@
-package ociseccompgen
+package seccompgen
 
 import (
 	"errors"
@@ -8,8 +8,8 @@ import (
 	types "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// parseArguments takes a list of arguments (delimArgs)  and a pointer to a
-// corresponding syscall struct. It parses and fills out the argument information
+// parseArguments takes a list of arguments (delimArgs).It parses and fills out
+// the argument information and returns a slice of arg structs
 func parseArguments(delimArgs []string) (*[]types.Arg, error) {
 	nilArgSlice := new([]types.Arg)
 

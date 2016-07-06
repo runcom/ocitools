@@ -13,10 +13,6 @@
 			"Rev": "aea32c919a18e5ef4537bbd283ff29594b1b0165"
 		},
 		{
-			"ImportPath": "github.com/opencontainers/ocitools/contrib/oci-seccomp-gen",
-			"Rev": "239e8e959e5dc236d54d007ec162b11919df0c9e"
-		},
-		{
 			"ImportPath": "github.com/opencontainers/runtime-spec/specs-go",
 			"Comment": "v1.0.0-rc1-15-g6de52a7",
 			"Rev": "6de52a7d39c52a1e287182d0b4e6c03068236639"
