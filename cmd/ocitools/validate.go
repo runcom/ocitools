@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -14,13 +16,16 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/blang/semver"
+	"github.com/opencontainers/ocitools/generate"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli"
 )
 
+type configCheck func(rspec.Spec, string, bool) []string
+
 var bundleValidateFlags = []cli.Flag{
 	cli.StringFlag{Name: "path", Value: ".", Usage: "path to a bundle"},
-	cli.BoolFlag{Name: "hooks", Usage: "Check specified hooks exist and are executable on the host."},
+	cli.BoolFlag{Name: "host-specific", Usage: "Check host specific configs."},
 }
 
 var (
@@ -46,7 +51,7 @@ var (
 
 var bundleValidateCommand = cli.Command{
 	Name:   "validate",
-	Usage:  "validate a OCI bundle",
+	Usage:  "validate an OCI bundle",
 	Flags:  bundleValidateFlags,
 	Before: before,
 	Action: func(context *cli.Context) error {
@@ -79,33 +84,56 @@ var bundleValidateCommand = cli.Command{
 			return fmt.Errorf("The root path %q is not a directory.", rootfsPath)
 		}
 
-		hooksCheck := context.Bool("hooks")
-		bundleValidate(spec, rootfsPath, hooksCheck)
-		logrus.Infof("Bundle validation succeeded.")
-		return nil
+		hostCheck := context.Bool("host-specific")
+
+		checks := []configCheck{
+			checkMandatoryFields,
+			checkSemVer,
+			checkMounts,
+			checkPlatform,
+			checkProcess,
+			checkLinux,
+			checkHooks,
+		}
+
+		errMsg := ""
+		i := 1
+		for _, check := range checks {
+			for _, msg := range check(spec, rootfsPath, hostCheck) {
+				errMsg = fmt.Sprintf("%s  %d. %s\n", errMsg, i, msg)
+				i++
+			}
+		}
+
+		if errMsg != "" {
+			errMsg = fmt.Sprintf("%d Errors detected:\n%s", i-1, errMsg)
+			return errors.New(errMsg)
+
+		} else {
+			fmt.Println("Bundle validation succeeded.")
+			return nil
+		}
 	},
 }
 
-func bundleValidate(spec rspec.Spec, rootfs string, hooksCheck bool) {
-	checkMandatoryField(spec)
-	checkSemVer(spec.Version)
-	checkPlatform(spec.Platform)
-	checkProcess(spec.Process, rootfs)
-	checkLinux(spec)
-	checkHooks(spec.Hooks, hooksCheck)
-}
+func checkSemVer(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check semver")
 
-func checkSemVer(version string) {
+	version := spec.Version
 	_, err := semver.Parse(version)
 	if err != nil {
-		logrus.Fatalf("%q is not valid SemVer: %s", version, err.Error())
+		msgs = append(msgs, fmt.Sprintf("%q is not valid SemVer: %s", version, err.Error()))
 	}
 	if version != rspec.Version {
-		logrus.Fatalf("internal error: validate currently only handles version %s, but the supplied configuration targets %s", rspec.Version, version)
+		msgs = append(msgs, fmt.Sprintf("internal error: validate currently only handles version %s, but the supplied configuration targets %s", rspec.Version, version))
 	}
+
+	return
 }
 
-func checkPlatform(platform rspec.Platform) {
+func checkPlatform(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check platform")
+
 	validCombins := map[string][]string{
 		"darwin":    {"386", "amd64", "arm", "arm64"},
 		"dragonfly": {"amd64"},
@@ -116,70 +144,82 @@ func checkPlatform(platform rspec.Platform) {
 		"plan9":     {"386", "amd64"},
 		"solaris":   {"amd64"},
 		"windows":   {"386", "amd64"}}
+	platform := spec.Platform
 	for os, archs := range validCombins {
 		if os == platform.OS {
 			for _, arch := range archs {
 				if arch == platform.Arch {
-					return
+					return nil
 				}
 			}
-			logrus.Fatalf("Combination of %q and %q is invalid.", platform.OS, platform.Arch)
+			msgs = append(msgs, fmt.Sprintf("Combination of %q and %q is invalid.", platform.OS, platform.Arch))
 		}
 	}
-	logrus.Fatalf("Operation system %q of the bundle is not supported yet.", platform.OS)
+	msgs = append(msgs, fmt.Sprintf("Operation system %q of the bundle is not supported yet.", platform.OS))
+
+	return
 }
 
-func checkHooks(hooks rspec.Hooks, hooksCheck bool) {
-	checkEventHooks("pre-start", hooks.Prestart, hooksCheck)
-	checkEventHooks("post-start", hooks.Poststart, hooksCheck)
-	checkEventHooks("post-stop", hooks.Poststop, hooksCheck)
+func checkHooks(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check hooks")
+
+	msgs = append(msgs, checkEventHooks("pre-start", spec.Hooks.Prestart, hostCheck)...)
+	msgs = append(msgs, checkEventHooks("post-start", spec.Hooks.Poststart, hostCheck)...)
+	msgs = append(msgs, checkEventHooks("post-stop", spec.Hooks.Poststop, hostCheck)...)
+
+	return
 }
 
-func checkEventHooks(hookType string, hooks []rspec.Hook, hooksCheck bool) {
+func checkEventHooks(hookType string, hooks []rspec.Hook, hostCheck bool) (msgs []string) {
 	for _, hook := range hooks {
 		if !filepath.IsAbs(hook.Path) {
-			logrus.Fatalf("The %s hook %v: is not absolute path", hookType, hook.Path)
+			msgs = append(msgs, fmt.Sprintf("The %s hook %v: is not absolute path", hookType, hook.Path))
 		}
 
-		if hooksCheck {
+		if hostCheck {
 			fi, err := os.Stat(hook.Path)
 			if err != nil {
-				logrus.Fatalf("Cannot find %s hook: %v", hookType, hook.Path)
+				msgs = append(msgs, fmt.Sprintf("Cannot find %s hook: %v", hookType, hook.Path))
 			}
 			if fi.Mode()&0111 == 0 {
-				logrus.Fatalf("The %s hook %v: is not executable", hookType, hook.Path)
+				msgs = append(msgs, fmt.Sprintf("The %s hook %v: is not executable", hookType, hook.Path))
 			}
 		}
 
 		for _, env := range hook.Env {
 			if !envValid(env) {
-				logrus.Fatalf("Env %q for hook %v is in the invalid form.", env, hook.Path)
+				msgs = append(msgs, fmt.Sprintf("Env %q for hook %v is in the invalid form.", env, hook.Path))
 			}
 		}
 	}
+
+	return
 }
 
-func checkProcess(process rspec.Process, rootfs string) {
+func checkProcess(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check process")
+
+	process := spec.Process
 	if !path.IsAbs(process.Cwd) {
-		logrus.Fatalf("cwd %q is not an absolute path", process.Cwd)
+		msgs = append(msgs, fmt.Sprintf("cwd %q is not an absolute path", process.Cwd))
 	}
 
 	for _, env := range process.Env {
 		if !envValid(env) {
-			logrus.Fatalf("env %q should be in the form of 'key=value'. The left hand side must consist solely of letters, digits, and underscores '_'.", env)
+			msgs = append(msgs, fmt.Sprintf("env %q should be in the form of 'key=value'. The left hand side must consist solely of letters, digits, and underscores '_'.", env))
 		}
 	}
 
 	for index := 0; index < len(process.Capabilities); index++ {
 		capability := process.Capabilities[index]
 		if !capValid(capability) {
-			logrus.Fatalf("capability %q is not valid, man capabilities(7)", process.Capabilities[index])
+			msgs = append(msgs, fmt.Sprintf("capability %q is not valid, man capabilities(7)", process.Capabilities[index]))
 		}
 	}
 
 	for index := 0; index < len(process.Rlimits); index++ {
 		if !rlimitValid(process.Rlimits[index].Type) {
-			logrus.Fatalf("rlimit type %q is invalid.", process.Rlimits[index].Type)
+			msgs = append(msgs, fmt.Sprintf("rlimit type %q is invalid.", process.Rlimits[index].Type))
 		}
 	}
 
@@ -187,28 +227,94 @@ func checkProcess(process rspec.Process, rootfs string) {
 		profilePath := path.Join(rootfs, "/etc/apparmor.d", process.ApparmorProfile)
 		_, err := os.Stat(profilePath)
 		if err != nil {
-			logrus.Fatal(err)
+			msgs = append(msgs, err.Error())
 		}
+	}
+
+	return
+}
+
+func supportedMountTypes(OS string, hostCheck bool) (map[string]bool, error) {
+	supportedTypes := make(map[string]bool)
+
+	if OS != "linux" && OS != "windows" {
+		logrus.Warnf("%v is not supported to check mount type", OS)
+		return nil, nil
+	} else if OS == "windows" {
+		supportedTypes["ntfs"] = true
+		return supportedTypes, nil
+	}
+
+	if hostCheck {
+		f, err := os.Open("/proc/filesystems")
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			if err := s.Err(); err != nil {
+				return supportedTypes, err
+			}
+
+			text := s.Text()
+			parts := strings.Split(text, "\t")
+			if len(parts) > 1 {
+				supportedTypes[parts[1]] = true
+			} else {
+				supportedTypes[parts[0]] = true
+			}
+		}
+
+		supportedTypes["bind"] = true
+
+		return supportedTypes, nil
+	} else {
+		logrus.Warn("Checking linux mount types without --host-specific is not supported yet")
+		return nil, nil
 	}
 }
 
+func checkMounts(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check mounts")
+
+	supportedTypes, err := supportedMountTypes(spec.Platform.OS, hostCheck)
+	if err != nil {
+		msgs = append(msgs, err.Error())
+		return
+	}
+
+	if supportedTypes != nil {
+		for _, mount := range spec.Mounts {
+			if !supportedTypes[mount.Type] {
+				msgs = append(msgs, fmt.Sprintf("Unsupported mount type %q", mount.Type))
+			}
+		}
+	}
+
+	return
+}
+
 //Linux only
-func checkLinux(spec rspec.Spec) {
+func checkLinux(spec rspec.Spec, rootfs string, hostCheck bool) (msgs []string) {
+	logrus.Debugf("check linux")
+
 	utsExists := false
 	ipcExists := false
 	mountExists := false
 	netExists := false
 
 	if len(spec.Linux.UIDMappings) > 5 {
-		logrus.Fatalf("Only 5 UID mappings are allowed (linux kernel restriction).")
+		msgs = append(msgs, "Only 5 UID mappings are allowed (linux kernel restriction).")
 	}
 	if len(spec.Linux.GIDMappings) > 5 {
-		logrus.Fatalf("Only 5 GID mappings are allowed (linux kernel restriction).")
+		msgs = append(msgs, "Only 5 GID mappings are allowed (linux kernel restriction).")
 	}
 
 	for index := 0; index < len(spec.Linux.Namespaces); index++ {
 		if !namespaceValid(spec.Linux.Namespaces[index]) {
-			logrus.Fatalf("namespace %v is invalid.", spec.Linux.Namespaces[index])
+			msgs = append(msgs, fmt.Sprintf("namespace %v is invalid.", spec.Linux.Namespaces[index]))
 		} else if len(spec.Linux.Namespaces[index].Path) == 0 {
 			if spec.Linux.Namespaces[index].Type == rspec.UTSNamespace {
 				utsExists = true
@@ -224,27 +330,28 @@ func checkLinux(spec rspec.Spec) {
 
 	for k := range spec.Linux.Sysctl {
 		if strings.HasPrefix(k, "net.") && !netExists {
-			logrus.Fatalf("Sysctl %v requires a new Network namespace to be specified as well", k)
+			msgs = append(msgs, fmt.Sprintf("Sysctl %v requires a new Network namespace to be specified as well", k))
 		}
 		if strings.HasPrefix(k, "fs.mqueue.") {
 			if !mountExists || !ipcExists {
-				logrus.Fatalf("Sysctl %v requires a new IPC namespace and Mount namespace to be specified as well", k)
+				msgs = append(msgs, fmt.Sprintf("Sysctl %v requires a new IPC namespace and Mount namespace to be specified as well", k))
 			}
 		}
 	}
 
 	if spec.Platform.OS == "linux" && !utsExists && spec.Hostname != "" {
-		logrus.Fatalf("On Linux, hostname requires a new UTS namespace to be specified as well")
+		msgs = append(msgs, fmt.Sprintf("On Linux, hostname requires a new UTS namespace to be specified as well"))
 	}
 
 	for index := 0; index < len(spec.Linux.Devices); index++ {
 		if !deviceValid(spec.Linux.Devices[index]) {
-			logrus.Fatalf("device %v is invalid.", spec.Linux.Devices[index])
+			msgs = append(msgs, fmt.Sprintf("device %v is invalid.", spec.Linux.Devices[index]))
 		}
 	}
 
 	if spec.Linux.Seccomp != nil {
-		checkSeccomp(*spec.Linux.Seccomp)
+		ms := checkSeccomp(*spec.Linux.Seccomp)
+		msgs = append(msgs, ms...)
 	}
 
 	switch spec.Linux.RootfsPropagation {
@@ -256,17 +363,21 @@ func checkLinux(spec rspec.Spec) {
 	case "shared":
 	case "rshared":
 	default:
-		logrus.Fatalf("rootfsPropagation must be empty or one of \"private|rprivate|slave|rslave|shared|rshared\"")
+		msgs = append(msgs, "rootfsPropagation must be empty or one of \"private|rprivate|slave|rslave|shared|rshared\"")
 	}
+
+	return
 }
 
-func checkSeccomp(s rspec.Seccomp) {
+func checkSeccomp(s rspec.Seccomp) (msgs []string) {
+	logrus.Debugf("check seccomp")
+
 	if !seccompActionValid(s.DefaultAction) {
-		logrus.Fatalf("seccomp defaultAction %q is invalid.", s.DefaultAction)
+		msgs = append(msgs, fmt.Sprintf("seccomp defaultAction %q is invalid.", s.DefaultAction))
 	}
 	for index := 0; index < len(s.Syscalls); index++ {
 		if !syscallValid(s.Syscalls[index]) {
-			logrus.Fatalf("syscall %v is invalid.", s.Syscalls[index])
+			msgs = append(msgs, fmt.Sprintf("syscall %v is invalid.", s.Syscalls[index]))
 		}
 	}
 	for index := 0; index < len(s.Architectures); index++ {
@@ -288,9 +399,11 @@ func checkSeccomp(s rspec.Seccomp) {
 		case rspec.ArchS390:
 		case rspec.ArchS390X:
 		default:
-			logrus.Fatalf("seccomp architecture %q is invalid", s.Architectures[index])
+			msgs = append(msgs, fmt.Sprintf("seccomp architecture %q is invalid", s.Architectures[index]))
 		}
 	}
+
+	return
 }
 
 func envValid(env string) bool {
@@ -310,7 +423,7 @@ func envValid(env string) bool {
 }
 
 func capValid(capability string) bool {
-	for _, val := range defaultCaps {
+	for _, val := range generate.DefaultCaps {
 		if val == capability {
 			return true
 		}
@@ -406,95 +519,74 @@ func isStructPtr(t reflect.Type) bool {
 	return t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct
 }
 
-func checkMandatoryUnit(field reflect.Value, tagField reflect.StructField, parent string) ([]string, bool) {
-	var msgs []string
+func checkMandatoryUnit(field reflect.Value, tagField reflect.StructField, parent string) (msgs []string) {
 	mandatory := !strings.Contains(tagField.Tag.Get("json"), "omitempty")
 	switch field.Kind() {
 	case reflect.Ptr:
 		if mandatory && field.IsNil() {
 			msgs = append(msgs, fmt.Sprintf("'%s.%s' should not be empty.", parent, tagField.Name))
-			return msgs, false
 		}
 	case reflect.String:
 		if mandatory && (field.Len() == 0) {
 			msgs = append(msgs, fmt.Sprintf("'%s.%s' should not be empty.", parent, tagField.Name))
-			return msgs, false
 		}
 	case reflect.Slice:
 		if mandatory && (field.IsNil() || field.Len() == 0) {
 			msgs = append(msgs, fmt.Sprintf("'%s.%s' should not be empty.", parent, tagField.Name))
-			return msgs, false
+			return
 		}
-		valid := true
 		for index := 0; index < field.Len(); index++ {
 			mValue := field.Index(index)
 			if mValue.CanInterface() {
-				if ms, ok := checkMandatory(mValue.Interface()); !ok {
-					msgs = append(msgs, ms...)
-					valid = false
-				}
+				msgs = append(msgs, checkMandatory(mValue.Interface())...)
 			}
 		}
-		return msgs, valid
 	case reflect.Map:
 		if mandatory && (field.IsNil() || field.Len() == 0) {
 			msgs = append(msgs, fmt.Sprintf("'%s.%s' should not be empty.", parent, tagField.Name))
-			return msgs, false
+			return msgs
 		}
-		valid := true
 		keys := field.MapKeys()
 		for index := 0; index < len(keys); index++ {
 			mValue := field.MapIndex(keys[index])
 			if mValue.CanInterface() {
-				if ms, ok := checkMandatory(mValue.Interface()); !ok {
-					msgs = append(msgs, ms...)
-					valid = false
-				}
+				msgs = append(msgs, checkMandatory(mValue.Interface())...)
 			}
 		}
-		return msgs, valid
 	default:
 	}
 
-	return nil, true
+	return
 }
 
-func checkMandatory(obj interface{}) (msgs []string, valid bool) {
+func checkMandatory(obj interface{}) (msgs []string) {
 	objT := reflect.TypeOf(obj)
 	objV := reflect.ValueOf(obj)
 	if isStructPtr(objT) {
 		objT = objT.Elem()
 		objV = objV.Elem()
 	} else if !isStruct(objT) {
-		return nil, true
+		return
 	}
 
-	valid = true
 	for i := 0; i < objT.NumField(); i++ {
 		t := objT.Field(i).Type
 		if isStructPtr(t) && objV.Field(i).IsNil() {
 			if !strings.Contains(objT.Field(i).Tag.Get("json"), "omitempty") {
 				msgs = append(msgs, fmt.Sprintf("'%s.%s' should not be empty", objT.Name(), objT.Field(i).Name))
-				valid = false
 			}
 		} else if (isStruct(t) || isStructPtr(t)) && objV.Field(i).CanInterface() {
-			if ms, ok := checkMandatory(objV.Field(i).Interface()); !ok {
-				msgs = append(msgs, ms...)
-				valid = false
-			}
+			msgs = append(msgs, checkMandatory(objV.Field(i).Interface())...)
 		} else {
-			if ms, ok := checkMandatoryUnit(objV.Field(i), objT.Field(i), objT.Name()); !ok {
-				msgs = append(msgs, ms...)
-				valid = false
-			}
+			msgs = append(msgs, checkMandatoryUnit(objV.Field(i), objT.Field(i), objT.Name())...)
 		}
 
 	}
-	return msgs, valid
+	return
 }
 
-func checkMandatoryField(obj interface{}) {
-	if msgs, valid := checkMandatory(obj); !valid {
-		logrus.Fatalf("Mandatory information missing: %s.", msgs)
-	}
+func checkMandatoryFields(spec rspec.Spec, rootfs string, hostCheck bool) []string {
+	logrus.Debugf("check mandatory fields")
+
+	return checkMandatory(spec)
 }
