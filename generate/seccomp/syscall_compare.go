@@ -1,4 +1,9 @@
-package seccompgen
+/*******************************************************************************
+This file contains functions for determining the action to be taken for adding
+				syscalls rules to the seccomp configuration.
+*******************************************************************************/
+
+package seccomp
 
 import (
 	"fmt"
@@ -8,13 +13,6 @@ import (
 
 	types "github.com/opencontainers/runtime-spec/specs-go"
 )
-
-/*******************************************************
-This file is a bunch of helper functions for determining
-what action should be taken for new syscalls.
-See github.com/grantseltzer/manhattan/Resources/Logic.png
-for a flowchart and explanation
-********************************************************/
 
 func decideCourseOfAction(newSyscall *types.Syscall, syscalls []types.Syscall) (string, error) {
 	ruleForSyscallAlreadyExists := false
@@ -30,7 +28,7 @@ func decideCourseOfAction(newSyscall *types.Syscall, syscalls []types.Syscall) (
 
 			if sameAction(newSyscall, &syscall) {
 				if bothHaveArgs(newSyscall, &syscall) {
-					sliceOfDeterminedActions = append(sliceOfDeterminedActions, appnd)
+					sliceOfDeterminedActions = append(sliceOfDeterminedActions, seccompAppend)
 				}
 				if onlyOneHasArgs(newSyscall, &syscall) {
 					if firstParamOnlyHasArgs(newSyscall, &syscall) {
@@ -47,11 +45,11 @@ func decideCourseOfAction(newSyscall *types.Syscall, syscalls []types.Syscall) (
 						sliceOfDeterminedActions = append(sliceOfDeterminedActions, "overwrite:"+strconv.Itoa(i))
 					}
 					if !sameArgs(newSyscall, &syscall) {
-						sliceOfDeterminedActions = append(sliceOfDeterminedActions, appnd)
+						sliceOfDeterminedActions = append(sliceOfDeterminedActions, seccompAppend)
 					}
 				}
 				if onlyOneHasArgs(newSyscall, &syscall) {
-					sliceOfDeterminedActions = append(sliceOfDeterminedActions, appnd)
+					sliceOfDeterminedActions = append(sliceOfDeterminedActions, seccompAppend)
 				}
 				if neitherHasArgs(newSyscall, &syscall) {
 					sliceOfDeterminedActions = append(sliceOfDeterminedActions, "overwrite:"+strconv.Itoa(i))
@@ -61,7 +59,7 @@ func decideCourseOfAction(newSyscall *types.Syscall, syscalls []types.Syscall) (
 	}
 
 	if !ruleForSyscallAlreadyExists {
-		sliceOfDeterminedActions = append(sliceOfDeterminedActions, appnd)
+		sliceOfDeterminedActions = append(sliceOfDeterminedActions, seccompAppend)
 	}
 
 	// Nothing has highest priority
@@ -73,14 +71,14 @@ func decideCourseOfAction(newSyscall *types.Syscall, syscalls []types.Syscall) (
 
 	// Overwrite has second highest priority
 	for _, determinedAction := range sliceOfDeterminedActions {
-		if strings.Contains(determinedAction, overwrite) {
+		if strings.Contains(determinedAction, seccompOverwrite) {
 			return determinedAction, nil
 		}
 	}
 
 	// Append has the lowest priority
 	for _, determinedAction := range sliceOfDeterminedActions {
-		if determinedAction == appnd {
+		if determinedAction == seccompAppend {
 			return determinedAction, nil
 		}
 	}

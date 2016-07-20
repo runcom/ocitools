@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"io/ioutil"
 	"os"
 	"runtime"
 
 	"github.com/opencontainers/ocitools/generate"
+	"github.com/opencontainers/ocitools/generate/seccomp"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli"
 )
@@ -48,11 +51,14 @@ var generateFlags = []cli.Flag{
 	cli.StringSliceFlag{Name: "gidmappings", Usage: "add GIDMappings e.g HostID:ContainerID:Size"},
 	cli.StringSliceFlag{Name: "sysctl", Usage: "add sysctl settings e.g net.ipv4.forward=1"},
 	cli.StringFlag{Name: "apparmor", Usage: "specifies the the apparmor profile for the container"},
-	cli.StringFlag{Name: "seccomp-default", Usage: "specifies the the defaultaction of Seccomp syscall restrictions"},
-	cli.StringSliceFlag{Name: "seccomp-arch", Usage: "specifies Additional architectures permitted to be used for system calls"},
-	cli.StringSliceFlag{Name: "seccomp-syscalls", Usage: "specifies Additional architectures permitted to be used for system calls, e.g Name:Action:Arg1_index/Arg1_value/Arg1_valuetwo/Arg1_op, Arg2_index/Arg2_value/Arg2_valuetwo/Arg2_op "},
-	cli.StringSliceFlag{Name: "seccomp-allow", Usage: "specifies syscalls to be added to allowed"},
-	cli.StringSliceFlag{Name: "seccomp-errno", Usage: "specifies syscalls to be added to list that returns an error"},
+	cli.BoolFlag{Name: "seccomp-only", Usage: "specifies to export just a seccomp configuration file"},
+	cli.StringFlag{Name: "seccomp-arch", Usage: "specifies additional architectures permitted to be used for system calls"},
+	cli.StringFlag{Name: "seccomp-default", Usage: "specifies default aciton to be used for system calls"},
+	cli.StringFlag{Name: "seccomp-allow", Usage: "specifies syscalls to respond with allow"},
+	cli.StringFlag{Name: "seccomp-trap", Usage: "specifies syscalls to respond with trap"},
+	cli.StringFlag{Name: "seccomp-errno", Usage: "specifies syscalls to respond with errno"},
+	cli.StringFlag{Name: "seccomp-trace", Usage: "specifies syscalls to respond with trace"},
+	cli.StringFlag{Name: "seccomp-kill", Usage: "specifies syscalls to respond with kill"},
 	cli.StringFlag{Name: "template", Usage: "base template to use for creating the configuration"},
 	cli.StringSliceFlag{Name: "label", Usage: "add annotations to the configuration e.g. key=value"},
 }
@@ -83,12 +89,15 @@ var generateCommand = cli.Command{
 			return err
 		}
 
-		if context.IsSet("output") {
-			output := context.String("output")
-			err = specgen.SaveToFile(output)
-		} else {
-			err = specgen.Save(os.Stdout)
+		if !onlyExportFlagSpecified(context) {
+			if context.IsSet("output") {
+				output := context.String("output")
+				err = specgen.SaveToFile(output)
+			} else {
+				err = specgen.Save(os.Stdout)
+			}
 		}
+
 		if err != nil {
 			return err
 		}
@@ -301,64 +310,79 @@ func setupSpec(g generate.Generator, context *cli.Context) error {
 		}
 	}
 
-	var sd string
-	var sa, ss []string
-
-	if context.IsSet("seccomp-default") {
-		sd = context.String("seccomp-default")
+	err := addSeccomp(spec, context)
+	if err != nil {
+		return err
 	}
 
-	if context.IsSet("seccomp-arch") {
-		sa = context.StringSlice("seccomp-arch")
-	}
+	return nil
+}
 
-	if context.IsSet("seccomp-syscalls") {
-		ss = context.StringSlice("seccomp-syscalls")
-	}
+func addSeccomp(spec *rspec.Spec, context *cli.Context) error {
+	var secc rspec.Seccomp
 
-	if sd == "" && len(sa) == 0 && len(ss) == 0 {
-		return nil
-	}
+	seccompDefault := context.String("seccomp-default")
+	seccompArch := context.String("seccomp-arch")
+	seccompKill := context.String("seccomp-kill")
+	seccompTrace := context.String("seccomp-trace")
+	seccompErrno := context.String("seccomp-errno")
+	seccompTrap := context.String("seccomp-trap")
+	seccompAllow := context.String("seccomp-allow")
 
 	// Set the DefaultAction of seccomp
-	if context.IsSet("seccomp-default") {
-		if err := g.SetLinuxSeccompDefault(sd); err != nil {
-			return err
-		}
+	if seccompDefault == "" {
+		seccompDefault = "errno"
+	}
+	err := seccomp.ParseDefaultAction(seccompDefault, &secc)
+	if err != nil {
+		return err
 	}
 
 	// Add the additional architectures permitted to be used for system calls
-	if context.IsSet("seccomp-arch") {
-		for _, arch := range sa {
-			if err := g.AddLinuxSeccompArch(arch); err != nil {
-				return err
-			}
-		}
+	if seccompArch == "" {
+		seccompArch = "amd64,x86,x32"
+	}
+	err = seccomp.ParseArchitectureFlag(seccompArch, &secc)
+	if err != nil {
+		return err
 	}
 
-	// Set syscall restrict in Seccomp
-	if context.IsSet("seccomp-syscalls") {
-		for _, syscall := range ss {
-			if err := g.AddLinuxSeccompSyscall(syscall); err != nil {
-				return err
-			}
-		}
+	err = seccomp.ParseSyscallFlag("kill", seccompKill, &secc)
+	if err != nil {
+		return err
 	}
 
-	if context.IsSet("seccomp-allow") {
-		seccompAllows := context.StringSlice("seccomp-allow")
-		for _, s := range seccompAllows {
-			g.AddLinuxSeccompSyscallAllow(s)
-		}
+	err = seccomp.ParseSyscallFlag("trace", seccompTrace, &secc)
+	if err != nil {
+		return err
 	}
 
-	if context.IsSet("seccomp-errno") {
-		seccompErrnos := context.StringSlice("seccomp-errno")
-		for _, s := range seccompErrnos {
-			g.AddLinuxSeccompSyscallErrno(s)
-		}
+	err = seccomp.ParseSyscallFlag("errno", seccompErrno, &secc)
+	if err != nil {
+		return err
 	}
 
+	err = seccomp.ParseSyscallFlag("trap", seccompTrap, &secc)
+	if err != nil {
+		return err
+	}
+
+	err = seccomp.ParseSyscallFlag("allow", seccompAllow, &secc)
+	if err != nil {
+		return err
+	}
+	if context.Bool("seccomp-only") {
+		data, err := json.MarshalIndent(&secc, "", "\t")
+		if err != nil {
+			return err
+		}
+		if err := ioutil.WriteFile("config.seccomp", data, 0666); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	spec.Linux.Seccomp = &secc
 	return nil
 }
 
@@ -381,4 +405,16 @@ func setupLinuxNamespaces(g generate.Generator, needsNewUser bool, nsMaps map[st
 		}
 		g.AddOrReplaceLinuxNamespace(nsName, nsPath)
 	}
+}
+
+func onlyExportFlagSpecified(context *cli.Context) bool {
+	onlyExportFlags := []bool{
+		context.Bool("seccomp-only"),
+	}
+	for _, flag := range onlyExportFlags {
+		if flag {
+			return true
+		}
+	}
+	return false
 }

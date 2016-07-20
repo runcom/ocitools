@@ -1,4 +1,4 @@
-package seccompgen
+package seccomp
 
 import (
 	"errors"

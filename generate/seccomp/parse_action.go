@@ -1,4 +1,4 @@
-package seccompgen
+package seccomp
 
 import (
 	"fmt"
@@ -13,7 +13,6 @@ import (
 // passed with it at the command line and a pointer to the config struct. It parses
 // the action and syscalls and updates the config accordingly
 func ParseSyscallFlag(action string, arguments string, config *types.Seccomp) error {
-
 	if arguments == "" {
 		return nil
 	}
@@ -49,11 +48,11 @@ func ParseSyscallFlag(action string, arguments string, config *types.Seccomp) er
 			logrus.Info("No action taken: ", newSyscall)
 		}
 
-		if delimDescison[0] == appnd {
+		if delimDescison[0] == seccompAppend {
 			config.Syscalls = append(config.Syscalls, newSyscall)
 		}
 
-		if delimDescison[0] == overwrite {
+		if delimDescison[0] == seccompOverwrite {
 			indexForOverwrite, err := strconv.ParseInt(delimDescison[1], 10, 32)
 			if err != nil {
 				return err
@@ -83,7 +82,6 @@ func parseAction(action string) (types.Action, error) {
 
 //ParseDefaultAction simply sets the default action of the seccomp configuration
 func ParseDefaultAction(action string, config *types.Seccomp) error {
-
 	if action == "" {
 		return nil
 	}
