@@ -24,6 +24,11 @@ type Generator struct {
 	spec *rspec.Spec
 }
 
+// ExportOptions has toggles for exporting only certain parts of the specification
+type ExportOptions struct {
+	Seccomp bool // seccomp toggles if only seccomp should be exported
+}
+
 // New creates a spec Generator with the default spec.
 func New() Generator {
 	spec := rspec.Spec{
@@ -180,8 +185,14 @@ func (g Generator) GetSpec() *rspec.Spec {
 }
 
 // Save writes the spec into w.
-func (g Generator) Save(w io.Writer) error {
-	data, err := json.MarshalIndent(g.spec, "", "\t")
+func (g Generator) Save(w io.Writer, exportOpts ExportOptions) (err error) {
+	var data []byte
+
+	if exportOpts.Seccomp {
+		data, err = json.MarshalIndent(g.spec.Linux.Seccomp, "", "\t")
+	} else {
+		data, err = json.MarshalIndent(g.spec, "", "\t")
+	}
 	if err != nil {
 		return err
 	}
@@ -195,13 +206,13 @@ func (g Generator) Save(w io.Writer) error {
 }
 
 // SaveToFile writes the spec into a file.
-func (g Generator) SaveToFile(path string) error {
+func (g Generator) SaveToFile(path string, exportOpts ExportOptions) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return g.Save(f)
+	return g.Save(f, exportOpts)
 }
 
 // SetVersion sets g.spec.Version.

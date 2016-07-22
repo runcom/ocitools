@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"io/ioutil"
 	"os"
 	"runtime"
 
@@ -53,7 +51,7 @@ var generateFlags = []cli.Flag{
 	cli.StringFlag{Name: "apparmor", Usage: "specifies the the apparmor profile for the container"},
 	cli.BoolFlag{Name: "seccomp-only", Usage: "specifies to export just a seccomp configuration file"},
 	cli.StringFlag{Name: "seccomp-arch", Usage: "specifies additional architectures permitted to be used for system calls"},
-	cli.StringFlag{Name: "seccomp-default", Usage: "specifies default aciton to be used for system calls"},
+	cli.StringFlag{Name: "seccomp-default", Usage: "specifies default action to be used for system calls"},
 	cli.StringFlag{Name: "seccomp-allow", Usage: "specifies syscalls to respond with allow"},
 	cli.StringFlag{Name: "seccomp-trap", Usage: "specifies syscalls to respond with trap"},
 	cli.StringFlag{Name: "seccomp-errno", Usage: "specifies syscalls to respond with errno"},
@@ -88,14 +86,13 @@ var generateCommand = cli.Command{
 		if err != nil {
 			return err
 		}
+		var exportOpts generate.ExportOptions
+		exportOpts.Seccomp = context.Bool("seccomp-only")
 
-		if !onlyExportFlagSpecified(context) {
-			if context.IsSet("output") {
-				output := context.String("output")
-				err = specgen.SaveToFile(output)
-			} else {
-				err = specgen.Save(os.Stdout)
-			}
+		if context.IsSet("output") {
+			err = specgen.SaveToFile(context.String("output"), exportOpts)
+		} else {
+			err = specgen.Save(os.Stdout, exportOpts)
 		}
 
 		if err != nil {
@@ -371,16 +368,6 @@ func addSeccomp(spec *rspec.Spec, context *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	if context.Bool("seccomp-only") {
-		data, err := json.MarshalIndent(&secc, "", "\t")
-		if err != nil {
-			return err
-		}
-		if err := ioutil.WriteFile("config.seccomp", data, 0666); err != nil {
-			return err
-		}
-		return nil
-	}
 
 	spec.Linux.Seccomp = &secc
 	return nil
@@ -405,16 +392,4 @@ func setupLinuxNamespaces(g generate.Generator, needsNewUser bool, nsMaps map[st
 		}
 		g.AddOrReplaceLinuxNamespace(nsName, nsPath)
 	}
-}
-
-func onlyExportFlagSpecified(context *cli.Context) bool {
-	onlyExportFlags := []bool{
-		context.Bool("seccomp-only"),
-	}
-	for _, flag := range onlyExportFlags {
-		if flag {
-			return true
-		}
-	}
-	return false
 }
